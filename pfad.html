@@ -1,0 +1,676 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  ArrowRight, Check, X, RefreshCw, ChevronRight, ChevronLeft, 
+  Play, Settings, Save, RotateCcw, HelpCircle, Network 
+} from 'lucide-react';
+
+// --- LEHRER KONFIGURATION (HIER ANPASSEN) ---
+// Dies ist ein komplexes Beispiel (ähnlich Westermann S.152 Typus).
+// q0 ist Start. q3 ist Endzustand.
+const DEFAULT_NFA_CONFIG = {
+  states: [0, 1, 2, 3],
+  alphabet: ['0', '1'],
+  startState: 0,
+  finalStates: [3],
+  transitions: {
+    // q0: Start, Loop bei 0 und 1, UND bei 1 nach q1 -> Nicht-Determinismus bei '1'
+    0: { '0': [0],    '1': [0, 1] }, 
+    // q1: Von q1 geht es bei '0' zu q2
+    1: { '0': [2],    '1': [] },     
+    // q2: Von q2 geht es bei '1' zu q3
+    2: { '0': [],     '1': [3] },    
+    // q3: Endzustand. Bei '0' Loop, bei '1' Rücksprung zu q1
+    3: { '0': [3],    '1': [1] } 
+  },
+  // Visuelle Positionen für die Grafik
+  layout: {
+    0: { x: 80,  y: 200, label: 'q0' },
+    1: { x: 200, y: 100, label: 'q1' },
+    2: { x: 200, y: 300, label: 'q2' },
+    3: { x: 320, y: 200, label: 'q3' }
+  }
+};
+
+// --- HILFSFUNKTIONEN ---
+
+// Menge formatieren: {0, 1} -> "{q0, q1}"
+const formatSet = (set) => {
+  if (!set || set.length === 0) return '∅';
+  const sorted = [...set].sort((a, b) => a - b);
+  return `{${sorted.map(s => `q${s}`).join(', ')}}`;
+};
+
+// Mengen vergleichen
+const areSetsEqual = (a, b) => {
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  const setA = new Set(a);
+  return b.every(x => setA.has(x));
+};
+
+// Berechnet die korrekte Zielmenge für eine gegebene Menge und Eingabe
+const calculateTarget = (sourceSet, symbol, config) => {
+  const targetSet = new Set();
+  if (!sourceSet) return [];
+  sourceSet.forEach(s => {
+    const targets = config.transitions[s]?.[symbol] || [];
+    targets.forEach(t => targetSet.add(t));
+  });
+  return Array.from(targetSet).sort((a, b) => a - b);
+};
+
+// --- HAUPTKOMPONENTE ---
+
+const NeaToDeaTrainer = () => {
+  const [config, setConfig] = useState(DEFAULT_NFA_CONFIG);
+  
+  // Lern-Fortschritt State
+  // Wir initialisieren direkt (lazy), um "undefined" Fehler beim ersten Render zu vermeiden
+  const [history, setHistory] = useState(() => {
+    const startSet = [DEFAULT_NFA_CONFIG.startState];
+    const initialState = {
+      discoveredStates: [startSet],
+      queue: [0], // Index in discoveredStates
+      transitions: {},
+      currentFocus: { stateIdx: 0, symbol: DEFAULT_NFA_CONFIG.alphabet[0] }
+    };
+    return [initialState];
+  });
+  
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const [userSelection, setUserSelection] = useState([]);
+  const [feedback, setFeedback] = useState(null);
+  const [isFinished, setIsFinished] = useState(false);
+
+  // Funktion zum Zurücksetzen
+  const resetExercise = () => {
+    const startSet = [config.startState];
+    const initialState = {
+      discoveredStates: [startSet],
+      queue: [0],
+      transitions: {},
+      currentFocus: { stateIdx: 0, symbol: config.alphabet[0] }
+    };
+    setHistory([initialState]);
+    setCurrentStepIndex(0);
+    setUserSelection([]);
+    setFeedback(null);
+    setIsFinished(false);
+  };
+
+  // Navigation: Zurück
+  const handleBack = () => {
+    if (currentStepIndex > 0) {
+      setCurrentStepIndex(prev => prev - 1);
+      setFeedback(null);
+      setUserSelection([]);
+      setIsFinished(false);
+    }
+  };
+
+  // Aktueller Zustand (Sicherer Zugriff)
+  const currentState = history[currentStepIndex];
+  // Guard clause falls currentState beim Re-Render kurzzeitig undefined wäre
+  if (!currentState) return <div className="p-10 text-center">Laden...</div>;
+
+  const { discoveredStates, queue, transitions, currentFocus } = currentState;
+
+  // State Toggle für Schüler-Eingabe
+  const handleToggleState = (stateId) => {
+    if (feedback && feedback.type === 'success') return; // Blockieren wenn schon gelöst
+    
+    setUserSelection(prev => {
+      if (prev.includes(stateId)) return prev.filter(id => id !== stateId);
+      return [...prev, stateId].sort((a, b) => a - b);
+    });
+  };
+
+  // --- DER KERN-ALGORITHMUS SCHRITT (Prüfung) ---
+  const checkAnswer = () => {
+    if (!currentFocus) return;
+
+    // 1. Hole Quell-Menge (z.B. {q0, q1})
+    const sourceSet = discoveredStates[currentFocus.stateIdx];
+    
+    // 2. Berechne korrekte Ziel-Menge
+    const correctTarget = calculateTarget(sourceSet, currentFocus.symbol, config);
+
+    // 3. Vergleiche mit Schüler-Eingabe
+    if (areSetsEqual(userSelection, correctTarget)) {
+      // RICHTIG!
+      
+      // Neuer Zustand?
+      const existingIdx = discoveredStates.findIndex(s => areSetsEqual(s, correctTarget));
+      const isNew = existingIdx === -1;
+      
+      // Nächsten State vorbereiten (Deep Copy für Immutability)
+      const nextDiscovered = [...discoveredStates];
+      const nextQueue = [...queue];
+      let targetIdx = existingIdx;
+
+      if (isNew) {
+        nextDiscovered.push(correctTarget);
+        targetIdx = nextDiscovered.length - 1;
+        nextQueue.push(targetIdx);
+      }
+
+      const nextTransitions = {
+        ...transitions,
+        [currentFocus.stateIdx]: {
+          ...(transitions[currentFocus.stateIdx] || {}),
+          [currentFocus.symbol]: targetIdx
+        }
+      };
+
+      // Nächsten Fokus bestimmen
+      let nextFocus = null;
+      const symbols = config.alphabet;
+      const currentSymbolIdx = symbols.indexOf(currentFocus.symbol);
+
+      if (currentSymbolIdx < symbols.length - 1) {
+        // Gleicher Zustand, nächstes Symbol
+        nextFocus = { 
+          stateIdx: currentFocus.stateIdx, 
+          symbol: symbols[currentSymbolIdx + 1] 
+        };
+      } else {
+        // Zustand fertig, nächster aus Queue?
+        // WICHTIG: Wir entfernen den aktuellen Zustand aus der Queue erst logisch, indem wir das erste Element ignorieren
+        const remainingQueue = nextQueue.slice(1);
+        if (remainingQueue.length > 0) {
+          nextFocus = {
+            stateIdx: remainingQueue[0],
+            symbol: symbols[0]
+          };
+        }
+      }
+
+      // Neuen History-Eintrag erstellen
+      const finalQueue = [...queue];
+      if (isNew) finalQueue.push(targetIdx);
+      if (currentSymbolIdx === symbols.length - 1) {
+          finalQueue.shift(); // Remove processed from queue
+      }
+
+      const newState = {
+        discoveredStates: nextDiscovered,
+        queue: finalQueue,
+        transitions: nextTransitions,
+        currentFocus: nextFocus
+      };
+
+      setFeedback({ 
+        type: 'success', 
+        message: isNew 
+          ? `Korrekt! Ein neuer Zustand ${formatSet(correctTarget)} wurde entdeckt.` 
+          : `Richtig! Wir landen im bekannten Zustand S${targetIdx}.`
+      });
+
+      // Automatisch weiter nach kurzer Zeit
+      setTimeout(() => {
+        setHistory(prev => [...prev.slice(0, currentStepIndex + 1), newState]);
+        setCurrentStepIndex(prev => prev + 1);
+        setUserSelection([]);
+        setFeedback(null);
+        if (!nextFocus) setIsFinished(true);
+      }, 1200);
+
+    } else {
+      // FALSCH
+      setFeedback({ 
+        type: 'error', 
+        message: 'Falsch. Überprüfe die Pfeile im NEA genau.' 
+      });
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-800 flex flex-col">
+      
+      {/* --- HEADER --- */}
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center sticky top-0 z-10 shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className="bg-indigo-600 text-white p-2 rounded-lg">
+            <Network size={24} />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold text-slate-800">Potenzmengenkonstruktion</h1>
+            <p className="text-xs text-slate-500">Oberstufe • NEA zu DEA • Buch-Beispiel S.152 (Simuliert)</p>
+          </div>
+        </div>
+
+        <div className="flex gap-2">
+          <button 
+            onClick={resetExercise} 
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+          >
+            <RotateCcw size={16} /> Neustart
+          </button>
+        </div>
+      </header>
+
+      <main className="flex-1 max-w-7xl mx-auto w-full p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        {/* --- LINKE SPALTE: VISUALISIERUNG --- */}
+        <div className="lg:col-span-5 flex flex-col gap-6">
+          
+          {/* NEA DIAGRAMM */}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[400px]">
+            <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+              <h3 className="font-semibold text-slate-700">1. Gegebener NEA</h3>
+              <span className="text-xs px-2 py-1 bg-indigo-100 text-indigo-700 rounded-full">Ursprung</span>
+            </div>
+            <div className="flex-1 relative bg-slate-50/50">
+               <NFAVisualizer 
+                  config={config} 
+                  activeStates={currentFocus ? discoveredStates[currentFocus.stateIdx] : []}
+               />
+            </div>
+          </div>
+
+          {/* DEA DIAGRAMM (LIVE) */}
+          <div className="bg-white rounded-xl shadow-sm border border-indigo-100 ring-4 ring-indigo-50 flex flex-col h-[400px]">
+            <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+              <h3 className="font-semibold text-slate-700">3. Ergebnis DEA</h3>
+              <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full">Dein Bauplan</span>
+            </div>
+            <div className="flex-1 relative flex items-center justify-center bg-slate-50/50">
+              {discoveredStates && discoveredStates.length > 0 ? (
+                <DFAVisualizer 
+                  states={discoveredStates}
+                  transitions={transitions}
+                  activeState={currentFocus?.stateIdx}
+                  nfaConfig={config}
+                />
+              ) : (
+                <span className="text-slate-400 italic">Diagramm entsteht hier...</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* --- RECHTE SPALTE: ARBEITSBEREICH --- */}
+        <div className="lg:col-span-7 flex flex-col gap-6">
+          
+          {/* INTERAKTIONS-KARTE */}
+          <div className="bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden relative">
+            
+            {/* Fortschrittsbalken oben */}
+            <div className="h-1 bg-slate-100 w-full">
+              <div 
+                className="h-full bg-indigo-600 transition-all duration-500" 
+                style={{ width: discoveredStates ? `${Math.min(100, (discoveredStates.length * 15))}%` : '0%' }}
+              ></div>
+            </div>
+
+            <div className="p-8">
+              {!isFinished && currentFocus ? (
+                <>
+                  <div className="flex justify-between items-end mb-6">
+                    <div>
+                       <span className="text-xs uppercase tracking-wider font-bold text-indigo-500">Schritt {currentStepIndex + 1}</span>
+                       <h2 className="text-2xl font-bold text-slate-800 mt-1">
+                         Übergang bestimmen
+                       </h2>
+                    </div>
+                    
+                    <div className="flex items-center gap-2 text-sm text-slate-500">
+                      <button 
+                        onClick={handleBack}
+                        disabled={currentStepIndex === 0}
+                        className="p-2 hover:bg-slate-100 rounded-full disabled:opacity-30 transition-colors"
+                        title="Schritt zurück"
+                      >
+                        <ChevronLeft size={20} />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="bg-indigo-50/50 rounded-xl p-6 border border-indigo-100 mb-6">
+                     <div className="flex items-center gap-4 mb-4 text-lg">
+                        Wir sind im Zustand: 
+                        <span className="font-mono font-bold bg-white px-3 py-1 rounded shadow-sm border border-indigo-200 text-indigo-700">
+                          S{currentFocus.stateIdx} = {formatSet(discoveredStates[currentFocus.stateIdx])}
+                        </span>
+                     </div>
+                     <div className="flex items-center gap-4 text-lg">
+                        Eingabe: 
+                        <span className="font-mono font-bold bg-slate-800 text-white w-10 h-10 flex items-center justify-center rounded shadow-sm">
+                          {currentFocus.symbol}
+                        </span>
+                     </div>
+                  </div>
+
+                  <p className="mb-4 font-medium text-slate-700">
+                    Wähle alle NEA-Zustände aus, die erreicht werden:
+                  </p>
+
+                  <div className="flex flex-wrap gap-3 mb-8">
+                    {config.states.map(sId => (
+                      <button
+                        key={sId}
+                        onClick={() => handleToggleState(sId)}
+                        disabled={feedback?.type === 'success'}
+                        className={`
+                          w-14 h-14 rounded-xl font-mono text-xl font-bold flex items-center justify-center transition-all shadow-sm
+                          ${userSelection.includes(sId) 
+                            ? 'bg-indigo-600 text-white shadow-indigo-200 scale-105 ring-2 ring-indigo-300 ring-offset-2' 
+                            : 'bg-white border-2 border-slate-200 text-slate-500 hover:border-indigo-400 hover:text-indigo-600'}
+                          ${feedback?.type === 'success' ? 'opacity-50 cursor-default' : ''}
+                        `}
+                      >
+                        q{sId}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => !feedback && setUserSelection([])}
+                      disabled={feedback?.type === 'success'}
+                      className={`
+                        px-4 h-14 rounded-xl border-2 border-dashed font-medium text-sm transition-colors ml-2
+                        ${userSelection.length === 0 ? 'border-indigo-400 bg-indigo-50 text-indigo-700' : 'border-slate-300 text-slate-400 hover:bg-slate-50'}
+                      `}
+                    >
+                      Leere Menge ∅
+                    </button>
+                  </div>
+
+                  {feedback && (
+                    <div className={`mb-6 p-4 rounded-lg flex items-start gap-3 animate-in fade-in slide-in-from-top-1 ${
+                      feedback.type === 'success' ? 'bg-green-50 text-green-900 border border-green-200' : 'bg-red-50 text-red-900 border border-red-200'
+                    }`}>
+                      {feedback.type === 'success' ? <Check className="mt-0.5 text-green-600" size={20} /> : <X className="mt-0.5 text-red-600" size={20} />}
+                      <p>{feedback.message}</p>
+                    </div>
+                  )}
+
+                  {!feedback && (
+                    <button 
+                      onClick={checkAnswer}
+                      className="w-full py-4 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-lg transition-all active:scale-[0.99] flex justify-center items-center gap-2"
+                    >
+                      Prüfen <ArrowRight size={20} />
+                    </button>
+                  )}
+                </>
+              ) : (
+                <div className="text-center py-10">
+                   <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                     <Check size={40} />
+                   </div>
+                   <h2 className="text-2xl font-bold text-slate-800 mb-2">Algorithmus beendet!</h2>
+                   <p className="text-slate-600 mb-8">
+                     Die Queue ist leer. Alle Zustände wurden bearbeitet. Der DEA ist vollständig.
+                   </p>
+                   <p className="text-sm bg-slate-100 p-3 rounded inline-block text-slate-500">
+                     Hinweis: Um das Beispiel zu wiederholen, drücke oben auf "Neustart".
+                   </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* TABELLE */}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+              <h3 className="font-semibold text-slate-700">2. Übergangstabelle</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-50 text-slate-500 font-bold border-b border-slate-200">
+                  <tr>
+                    <th className="px-6 py-3 border-r border-slate-200 w-32">DEA Zustand</th>
+                    <th className="px-6 py-3 border-r border-slate-200">NEA Menge</th>
+                    {config.alphabet.map(sym => (
+                      <th key={sym} className="px-6 py-3 text-center w-32">Eingabe '{sym}'</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {discoveredStates.map((set, idx) => {
+                    // Check if row is currently active
+                    const isActiveRow = currentFocus && currentFocus.stateIdx === idx;
+                    const isFinal = set.some(s => config.finalStates.includes(s));
+
+                    return (
+                      <tr key={idx} className={isActiveRow ? 'bg-indigo-50/40' : ''}>
+                        <td className="px-6 py-4 font-mono font-bold text-indigo-700 border-r border-slate-100 bg-slate-50/30">
+                          {isFinal && <span className="inline-block w-2 h-2 bg-red-500 rounded-full mr-2 mb-0.5" title="Endzustand"></span>}
+                          S{idx}
+                        </td>
+                        <td className="px-6 py-4 font-mono text-slate-600 border-r border-slate-100">
+                          {formatSet(set)}
+                        </td>
+                        {config.alphabet.map(sym => {
+                          const targetIdx = transitions[idx]?.[sym];
+                          const isActiveCell = isActiveRow && currentFocus.symbol === sym;
+                          
+                          return (
+                            <td key={sym} className={`px-6 py-4 text-center font-mono border-l border-slate-50 ${isActiveCell ? 'bg-yellow-50 ring-2 ring-inset ring-yellow-200 rounded' : ''}`}>
+                              {targetIdx !== undefined ? (
+                                <span className="px-2 py-1 bg-white border border-slate-200 rounded shadow-sm text-slate-700 font-bold">
+                                  S{targetIdx}
+                                </span>
+                              ) : (
+                                <span className="text-slate-300">-</span>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      </main>
+    </div>
+  );
+};
+
+// --- VISUALISIERUNGS KOMPONENTEN ---
+
+// 1. NFA Visualizer (Links Oben)
+const NFAVisualizer = ({ config, activeStates }) => {
+  return (
+    <svg viewBox="0 0 400 400" className="w-full h-full select-none pointer-events-none">
+      <defs>
+        <marker id="arrow-nfa" markerWidth="10" markerHeight="7" refX="32" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
+        </marker>
+        <marker id="arrow-nfa-loop" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+           <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
+        </marker>
+      </defs>
+
+      {/* --- PFEILE (Fest für das Beispiel layout) --- */}
+      {/* 0 -> 0 (0, 1) - Der Start-Loop ist hier doppelt: bei 0 UND bei 1 */}
+      <LoopPath x={80} y={200} label="0, 1" dir="left" />
+      
+      {/* 0 -> 1 (1) */}
+      <LinePath x1={80} y1={200} x2={200} y2={100} label="1" />
+      
+      {/* 1 -> 2 (0) */}
+      <LinePath x1={200} y1={100} x2={200} y2={300} label="0" />
+      
+      {/* 2 -> 3 (1) */}
+      <LinePath x1={200} y1={300} x2={320} y2={200} label="1" />
+      
+      {/* 3 -> 3 (0) */}
+      <LoopPath x={320} y={200} label="0" dir="right" />
+      
+      {/* 3 -> 1 (1) - Der Rücksprung! */}
+      <LinePath x1={320} y1={200} x2={200} y2={100} label="1" curve={true} />
+
+      {/* STATES */}
+      {config.states.map(id => {
+        const layout = config.layout[id];
+        const isActive = activeStates && activeStates.includes(id);
+        const isFinal = config.finalStates.includes(id);
+        return (
+          <g key={id} transform={`translate(${layout.x}, ${layout.y})`} className="transition-all duration-300">
+            <circle 
+              r="20" 
+              fill={isActive ? '#e0e7ff' : 'white'} 
+              stroke={isActive ? '#4f46e5' : '#64748b'} 
+              strokeWidth={isActive ? 3 : 2} 
+            />
+            {isFinal && <circle r="16" fill="none" stroke={isActive ? '#4f46e5' : '#64748b'} strokeWidth="1" />}
+            <text 
+              y="5" textAnchor="middle" 
+              className={`font-mono text-sm font-bold ${isActive ? 'fill-indigo-700' : 'fill-slate-600'}`}
+            >
+              {layout.label}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+};
+
+// 2. DFA Visualizer (Links Unten, Dynamisch)
+const DFAVisualizer = ({ states, transitions, activeState, nfaConfig }) => {
+  // Grid Layout berechnen
+  const getLayout = (idx) => {
+    const col = idx % 2; // 2 Spalten Layout damit es in die Box passt
+    const row = Math.floor(idx / 2);
+    return { x: 100 + col * 180, y: 80 + row * 100 };
+  };
+
+  return (
+    <svg viewBox="0 0 400 400" className="w-full h-full select-none">
+      <defs>
+        <marker id="arrow-dfa" markerWidth="10" markerHeight="7" refX="32" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#4338ca" />
+        </marker>
+        <marker id="arrow-dfa-loop" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+           <polygon points="0 0, 10 3.5, 0 7" fill="#4338ca" />
+        </marker>
+      </defs>
+
+      {/* Kanten zeichnen */}
+      {Object.entries(transitions).map(([src, targets]) => {
+        const sIdx = parseInt(src);
+        const p1 = getLayout(sIdx);
+
+        // Ziele gruppieren für Labels
+        const grouped = {};
+        Object.entries(targets).forEach(([sym, tIdx]) => {
+          if(!grouped[tIdx]) grouped[tIdx] = [];
+          grouped[tIdx].push(sym);
+        });
+
+        // Wir nutzen hier Fragmente statt Arrays, um das "Objects invalid" Problem zu vermeiden
+        return (
+          <React.Fragment key={src}>
+            {Object.entries(grouped).map(([t, syms]) => {
+              const tIdx = parseInt(t);
+              const p2 = getLayout(tIdx);
+              const label = syms.join(',');
+
+              if(sIdx === tIdx) {
+                return <LoopPath key={`${src}-${t}`} x={p1.x} y={p1.y} label={label} dir="right" color="#4338ca" markerId="arrow-dfa-loop" />;
+              }
+              return (
+                <LinePath 
+                  key={`${src}-${t}`} 
+                  x1={p1.x} y1={p1.y} 
+                  x2={p2.x} y2={p2.y} 
+                  label={label} 
+                  color="#4338ca" 
+                  markerId="arrow-dfa"
+                  curve={Math.abs(sIdx - tIdx) > 2} // Kurve wenn weit weg
+                />
+              );
+            })}
+          </React.Fragment>
+        );
+      })}
+
+      {/* Knoten zeichnen */}
+      {states.map((set, idx) => {
+        const pos = getLayout(idx);
+        const isFinal = set.some(s => nfaConfig.finalStates.includes(s));
+        const isCurrent = idx === activeState;
+
+        return (
+          <g key={idx} transform={`translate(${pos.x}, ${pos.y})`}>
+            <circle 
+              r="22" 
+              fill={isCurrent ? '#fbbf24' : 'white'} // Gelb wenn gerade bearbeitet
+              stroke="#4338ca" 
+              strokeWidth={isCurrent ? 3 : 2} 
+            />
+            {isFinal && <circle r="18" fill="none" stroke="#4338ca" strokeWidth="1" />}
+            <text y="4" textAnchor="middle" className="font-mono font-bold fill-indigo-900 text-sm">S{idx}</text>
+            <text y="36" textAnchor="middle" className="font-mono text-[10px] fill-indigo-400">
+               {formatSet(set).replace(/q/g,'').replace(/ /g,'')}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+};
+
+
+// --- SVG PRIMITIVES ---
+
+const LinePath = ({ x1, y1, x2, y2, label, curve=false, color="#94a3b8", markerId="arrow-nfa" }) => {
+  const mx = (x1 + x2) / 2;
+  const my = (y1 + y2) / 2;
+  
+  let d = `M ${x1} ${y1} L ${x2} ${y2}`;
+  let lx = mx, ly = my;
+
+  if (curve) {
+     // Einfache quadratische Kurve für Rücksprünge
+     const dx = x2 - x1;
+     const dy = y2 - y1;
+     const cx = mx - dy * 0.3; // Control Point Offset
+     const cy = my + dx * 0.3;
+     d = `M ${x1} ${y1} Q ${cx} ${cy} ${x2} ${y2}`;
+     lx = cx * 0.5 + mx * 0.5; // Approx label pos
+     ly = cy * 0.5 + my * 0.5;
+  }
+
+  return (
+    <g>
+      <path d={d} fill="none" stroke={color} strokeWidth="2" markerEnd={`url(#${markerId})`} />
+      <rect x={lx - 8} y={ly - 8} width="16" height="16" rx="4" fill="white" stroke={color} strokeWidth="1" />
+      <text x={lx} y={ly + 4} textAnchor="middle" className="text-xs font-bold font-mono" fill={color}>{label}</text>
+    </g>
+  );
+};
+
+const LoopPath = ({ x, y, label, dir='top', color="#94a3b8", markerId="arrow-nfa-loop" }) => {
+  // Loop Configs
+  const offsets = {
+     top:   { dx: 0, dy: -1 },
+     right: { dx: 1, dy: 0 },
+     bottom:{ dx: 0, dy: 1 },
+     left:  { dx: -1, dy: 0 }
+  };
+  const o = offsets[dir] || offsets.top;
+  
+  // Bezier Control Points für einen schönen Loop
+  const r = 20; 
+  // Diese Werte wurden visuell abgestimmt für svg viewBox 400x400
+  const cp1x = x + o.dx * 50 - o.dy * 30;
+  const cp1y = y + o.dy * 50 + o.dx * 30;
+  const cp2x = x + o.dx * 50 + o.dy * 30;
+  const cp2y = y + o.dy * 50 - o.dx * 30;
+
+  return (
+    <g>
+      <path d={`M ${x} ${y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${x} ${y}`} fill="none" stroke={color} strokeWidth="2" markerEnd={`url(#${markerId})`} />
+      <rect x={x + o.dx*45 - 8} y={y + o.dy*45 - 8} width="16" height="16" rx="4" fill="white" stroke={color} />
+      <text x={x + o.dx*45} y={y + o.dy*45 + 4} textAnchor="middle" className="text-xs font-bold font-mono" fill={color}>{label}</text>
+    </g>
+  );
+};
+
+export default NeaToDeaTrainer;
