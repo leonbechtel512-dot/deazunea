@@ -1,51 +1,40 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  ArrowRight, Check, X, RefreshCw, ChevronLeft, 
-  Network 
+  ArrowRight, Check, X, Lock, Play, 
+  RotateCcw, Trophy, AlertCircle, Network,
+  Star, Hash, Activity
 } from 'lucide-react';
 
-// --- KONFIGURATION: EINFACHES BEISPIEL ---
-// Szenario: Automat erkennt Wörter, die auf "10" enden.
-// Ein Klassiker für den Einstieg.
-const SIMPLE_NFA_CONFIG = {
-  states: [0, 1, 2],
-  alphabet: ['0', '1'],
-  startState: 0,
-  finalStates: [2],
-  transitions: {
-    // q0: Start. Wartet. Bei '1' kann es der Anfang der Endung sein -> q0 & q1
-    0: { '0': [0],    '1': [0, 1] }, 
-    // q1: Hat '1' gelesen. Braucht '0' zum Ende.
-    1: { '0': [2],    '1': [] },     
-    // q2: Hat '10' gelesen. (Endzustand). Sackgasse im NEA (oder Neustart).
-    2: { '0': [],     '1': [] }    
-  },
-  // Positionen für die Grafik (Schön in einer Reihe)
-  layout: {
-    0: { x: 100, y: 200, label: 'q0' },
-    1: { x: 250, y: 200, label: 'q1' },
-    2: { x: 400, y: 200, label: 'q2' }
-  }
-};
+// --- HELPER ---
 
-// --- HILFSFUNKTIONEN ---
-
-const formatSet = (set) => {
+const formatSetString = (set) => {
   if (!set || set.length === 0) return '∅';
   const sorted = [...set].sort((a, b) => a - b);
   return `{${sorted.map(s => `q${s}`).join(', ')}}`;
 };
 
+// SVG-Label Helper (q mit Index)
+const LabelRenderer = ({ x, y, main, sub, active }) => (
+  <text x={x} y={y} textAnchor="middle" className={`font-mono font-bold select-none transition-colors duration-300 ${active ? 'fill-indigo-700' : 'fill-slate-600'}`}>
+    {main}
+    <tspan dy="5" fontSize="11" fontWeight="bold">{sub}</tspan>
+  </text>
+);
+
+const formatNodeLabelParts = (set) => {
+  if (!set || set.length === 0) return { main: 'q', sub: '∅' }; 
+  const sorted = [...set].sort((a, b) => a - b);
+  return { main: 'q', sub: sorted.join(',') };
+};
+
 const areSetsEqual = (a, b) => {
   if (!a || !b) return false;
-  if (a.length !== b.length) return false;
   const setA = new Set(a);
-  return b.every(x => setA.has(x));
+  return a.length === b.length && b.every(x => setA.has(x));
 };
 
 const calculateTarget = (sourceSet, symbol, config) => {
   const targetSet = new Set();
-  if (!sourceSet) return [];
   sourceSet.forEach(s => {
     const targets = config.transitions[s]?.[symbol] || [];
     targets.forEach(t => targetSet.add(t));
@@ -53,378 +42,662 @@ const calculateTarget = (sourceSet, symbol, config) => {
   return Array.from(targetSet).sort((a, b) => a - b);
 };
 
-// --- HAUPTKOMPONENTE ---
+// --- LEVELS CONFIG (6 Levels) ---
 
-const NeaToDeaTrainer = () => {
-  const [config] = useState(SIMPLE_NFA_CONFIG);
-  
-  // Lazy State Init gegen "undefined" Fehler beim Laden
-  const [history, setHistory] = useState(() => {
-    const startSet = [SIMPLE_NFA_CONFIG.startState];
-    return [{
-      discoveredStates: [startSet],
-      queue: [0], 
-      transitions: {},
-      currentFocus: { stateIdx: 0, symbol: SIMPLE_NFA_CONFIG.alphabet[0] }
-    }];
-  });
-  
-  const [currentStepIndex, setCurrentStepIndex] = useState(0);
-  const [userSelection, setUserSelection] = useState([]);
-  const [feedback, setFeedback] = useState(null);
-  const [isFinished, setIsFinished] = useState(false);
-
-  // Reset
-  const resetExercise = () => {
-    const startSet = [config.startState];
-    setHistory([{
-      discoveredStates: [startSet],
-      queue: [0],
-      transitions: {},
-      currentFocus: { stateIdx: 0, symbol: config.alphabet[0] }
-    }]);
-    setCurrentStepIndex(0);
-    setUserSelection([]);
-    setFeedback(null);
-    setIsFinished(false);
-  };
-
-  const handleBack = () => {
-    if (currentStepIndex > 0) {
-      setCurrentStepIndex(prev => prev - 1);
-      setFeedback(null);
-      setUserSelection([]);
-      setIsFinished(false);
+const LEVELS = [
+  {
+    id: 1,
+    title: "Level 1: Der Einstieg",
+    description: "Wort endet auf '1'. Klein und übersichtlich.",
+    difficulty: "Einfach",
+    config: {
+      states: [0, 1],
+      alphabet: ['0', '1'],
+      startState: 0,
+      finalStates: [1],
+      transitions: { 0: {'0':[0], '1':[0,1]}, 1: {'0':[], '1':[]} },
+      layout: { 0: {x:150, y:150, label:'q0'}, 1: {x:350, y:150, label:'q1'} }
     }
-  };
-
-  const currentState = history[currentStepIndex];
-  // Sicherheits-Check falls Render schneller als State ist
-  if (!currentState) return <div className="p-8 text-center">Laden...</div>;
-
-  const { discoveredStates, queue, transitions, currentFocus } = currentState;
-
-  const handleToggleState = (stateId) => {
-    if (feedback?.type === 'success') return; 
-    setUserSelection(prev => 
-      prev.includes(stateId) ? prev.filter(id => id !== stateId) : [...prev, stateId].sort((a,b)=>a-b)
-    );
-  };
-
-  const checkAnswer = () => {
-    if (!currentFocus) return;
-
-    const sourceSet = discoveredStates[currentFocus.stateIdx];
-    const correctTarget = calculateTarget(sourceSet, currentFocus.symbol, config);
-
-    if (areSetsEqual(userSelection, correctTarget)) {
-      // Richtig
-      const existingIdx = discoveredStates.findIndex(s => areSetsEqual(s, correctTarget));
-      const isNew = existingIdx === -1;
-      
-      const nextDiscovered = [...discoveredStates];
-      const nextQueue = [...queue]; // Kopie der aktuellen Queue
-      let targetIdx = existingIdx;
-
-      if (isNew) {
-        nextDiscovered.push(correctTarget);
-        targetIdx = nextDiscovered.length - 1;
-        nextQueue.push(targetIdx); // Neuen Zustand hinten anfügen
-      }
-
-      const nextTransitions = {
-        ...transitions,
-        [currentFocus.stateIdx]: {
-          ...(transitions[currentFocus.stateIdx] || {}),
-          [currentFocus.symbol]: targetIdx
-        }
-      };
-
-      // Nächsten Fokus berechnen
-      const symbols = config.alphabet;
-      const currentSymbolIdx = symbols.indexOf(currentFocus.symbol);
-      let nextFocus = null;
-
-      // Queue Management für den nächsten Schritt
-      let nextStepQueue = [...nextQueue]; 
-      
-      if (currentSymbolIdx < symbols.length - 1) {
-        // Gleicher Zustand, nächstes Zeichen
-        nextFocus = { 
-          stateIdx: currentFocus.stateIdx, 
-          symbol: symbols[currentSymbolIdx + 1] 
-        };
-      } else {
-        // Zeichen für diesen Zustand fertig -> Entferne ihn vorne aus der Queue
-        nextStepQueue.shift(); 
-        
-        if (nextStepQueue.length > 0) {
-          nextFocus = {
-            stateIdx: nextStepQueue[0],
-            symbol: symbols[0]
-          };
-        }
-      }
-
-      const newState = {
-        discoveredStates: nextDiscovered,
-        queue: nextStepQueue,
-        transitions: nextTransitions,
-        currentFocus: nextFocus
-      };
-
-      setFeedback({ 
-        type: 'success', 
-        message: isNew 
-          ? `Korrekt! Neuer Zustand ${formatSet(correctTarget)} gefunden.` 
-          : `Richtig! Führt zum bekannten Zustand S${targetIdx}.`
-      });
-
-      setTimeout(() => {
-        setHistory(prev => [...prev.slice(0, currentStepIndex + 1), newState]);
-        setCurrentStepIndex(prev => prev + 1);
-        setUserSelection([]);
-        setFeedback(null);
-        if (!nextFocus) setIsFinished(true);
-      }, 1000);
-
-    } else {
-      setFeedback({ type: 'error', message: 'Das stimmt nicht. Verfolge die Pfeile oben genau.' });
+  },
+  {
+    id: 2,
+    title: "Level 2: Die Bedingung",
+    description: "Wort enthält irgendwo eine '1'.",
+    difficulty: "Einfach",
+    config: {
+      states: [0, 1],
+      alphabet: ['0', '1'],
+      startState: 0,
+      finalStates: [1],
+      transitions: { 0: {'0':[0], '1':[0,1]}, 1: {'0':[1], '1':[1]} }, 
+      layout: { 0: {x:150, y:150, label:'q0'}, 1: {x:350, y:150, label:'q1'} }
     }
+  },
+  {
+    id: 3,
+    title: "Level 3: Das Muster",
+    description: "Wort endet auf '01'. Drei Zustände.",
+    difficulty: "Mittel",
+    config: {
+      states: [0, 1, 2],
+      alphabet: ['0', '1'],
+      startState: 0,
+      finalStates: [2],
+      transitions: { 0: {'0':[0,1], '1':[0]}, 1: {'0':[], '1':[2]}, 2: {'0':[], '1':[]} },
+      layout: { 0: {x:100, y:150, label:'q0'}, 1: {x:250, y:150, label:'q1'}, 2: {x:400, y:150, label:'q2'} }
+    }
+  },
+  {
+    id: 4,
+    title: "Level 4: Die Sequenz",
+    description: "Wort enthält '10'. Achte auf die Verzweigungen.",
+    difficulty: "Mittel",
+    config: {
+      states: [0, 1, 2],
+      alphabet: ['0', '1'],
+      startState: 0,
+      finalStates: [2],
+      transitions: { 0: {'0':[0], '1':[0,1]}, 1: {'0':[2], '1':[]}, 2: {'0':[2], '1':[2]} },
+      layout: { 0: {x:100, y:150, label:'q0'}, 1: {x:250, y:150, label:'q1'}, 2: {x:400, y:150, label:'q2'} }
+    }
+  },
+  {
+    id: 5,
+    title: "Level 5: Meisterprüfung",
+    description: "Der komplexe Automat mit Rücksprüngen.",
+    difficulty: "Schwer",
+    config: {
+      states: [0, 1, 2, 3],
+      alphabet: ['0', '1'],
+      startState: 0,
+      finalStates: [3],
+      transitions: { 0: {'0':[0], '1':[0,1]}, 1: {'0':[2], '1':[]}, 2: {'0':[], '1':[3]}, 3: {'0':[3], '1':[1]} },
+      layout: { 0: {x:100, y:200, label:'q0'}, 1: {x:220, y:100, label:'q1'}, 2: {x:220, y:300, label:'q2'}, 3: {x:340, y:200, label:'q3'} }
+    }
+  },
+  {
+    id: 6,
+    title: "Level 6: Der Endgegner",
+    description: "Superschwer: '101' mit fiesem Rücksprung zum Anfang.",
+    difficulty: "Expert",
+    config: {
+      states: [0, 1, 2, 3],
+      alphabet: ['0', '1'],
+      startState: 0,
+      finalStates: [3],
+      transitions: { 
+        0: {'0':[0], '1':[0,1]}, 
+        1: {'0':[2], '1':[]}, 
+        2: {'0':[], '1':[3]}, 
+        3: {'0':[1], '1':[0]} // Rücksprung q3 -> q1 bei 0, q3 -> q0 bei 1
+      },
+      layout: { 
+        0: {x:80, y:150, label:'q0'}, 
+        1: {x:200, y:80, label:'q1'}, 
+        2: {x:320, y:80, label:'q2'}, 
+        3: {x:440, y:150, label:'q3'} 
+      }
+    }
+  }
+];
+
+// --- APP MAIN ---
+
+const App = () => {
+  const [screen, setScreen] = useState('menu'); 
+  const [activeLevelId, setActiveLevelId] = useState(1);
+  const [progress, setProgress] = useState({ 1: { unlocked: true, score: 0 } });
+  const [totalScore, setTotalScore] = useState(0);
+
+  // Score neu berechnen (mit NaN Schutz)
+  useEffect(() => {
+    const sum = Object.values(progress).reduce((acc, curr) => {
+        const s = curr.score || 0;
+        return acc + (isNaN(s) ? 0 : s);
+    }, 0);
+    setTotalScore(sum);
+  }, [progress]);
+
+  const startLevel = (id) => {
+    setActiveLevelId(id);
+    setScreen('level');
+  };
+
+  const handleLevelComplete = (id, statsOrMistakes) => {
+    let mistakes = 0;
+    if (typeof statsOrMistakes === 'object' && statsOrMistakes !== null) {
+        mistakes = (statsOrMistakes.tableMistakes || 0) + (statsOrMistakes.builderMistakes || 0) + (statsOrMistakes.mistakes || 0);
+    } else if (typeof statsOrMistakes === 'number') {
+        mistakes = statsOrMistakes;
+    }
+
+    const levelScore = Math.max(100, 1000 - (mistakes * 50));
+
+    setProgress(prev => {
+      const next = { ...prev };
+      const oldScore = next[id]?.score || 0;
+      next[id] = { ...next[id], complete: true, score: Math.max(oldScore, levelScore) };
+      if (id < LEVELS.length) {
+        if (!next[id + 1]) next[id + 1] = {};
+        next[id + 1].unlocked = true;
+      }
+      return next;
+    });
+    setScreen('menu');
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-800 flex flex-col">
-      <header className="bg-white border-b px-6 py-4 flex justify-between items-center sticky top-0 z-10">
-        <div className="flex items-center gap-3">
-          <div className="bg-indigo-600 text-white p-2 rounded-lg"><Network size={24} /></div>
-          <div>
-            <h1 className="text-xl font-bold">Potenzmengenkonstruktion</h1>
-            <p className="text-xs text-slate-500">Einfaches Beispiel: "Endet auf 10"</p>
-          </div>
-        </div>
-        <button onClick={resetExercise} className="flex gap-2 px-3 py-2 text-sm bg-slate-100 rounded hover:bg-slate-200">
-          <RefreshCw size={16} /> Neustart
-        </button>
-      </header>
-
-      <main className="flex-1 max-w-6xl mx-auto w-full p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
-        {/* VISUALISIERUNG */}
-        <div className="lg:col-span-5 flex flex-col gap-6">
-          <div className="bg-white rounded-xl shadow-sm border p-4 h-[300px] flex flex-col">
-            <h3 className="font-bold text-slate-700 mb-2">1. Der NEA (Vorgabe)</h3>
-            <div className="flex-1 relative bg-slate-50 rounded border">
-               <NFAVisualizer config={config} activeStates={currentFocus ? discoveredStates[currentFocus.stateIdx] : []} />
-            </div>
-          </div>
-
-          <div className="bg-white rounded-xl shadow-sm border p-4 h-[300px] flex flex-col">
-            <h3 className="font-bold text-slate-700 mb-2">3. Der DEA (Ergebnis)</h3>
-            <div className="flex-1 relative bg-slate-50 rounded border flex items-center justify-center">
-              {discoveredStates.length > 0 ? (
-                <DFAVisualizer states={discoveredStates} transitions={transitions} activeState={currentFocus?.stateIdx} nfaConfig={config} />
-              ) : <span className="text-slate-400">Diagramm entsteht...</span>}
-            </div>
-          </div>
-        </div>
-
-        {/* ARBEITSBEREICH */}
-        <div className="lg:col-span-7 flex flex-col gap-6">
-          <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
-            <div className="h-1 bg-slate-100"><div className="h-full bg-indigo-600 transition-all" style={{ width: `${(discoveredStates.length * 25)}%` }}></div></div>
-            
-            <div className="p-8">
-              {!isFinished && currentFocus ? (
-                <>
-                  <div className="flex justify-between items-end mb-6">
-                    <div>
-                       <span className="text-xs font-bold text-indigo-500">SCHRITT {currentStepIndex + 1}</span>
-                       <h2 className="text-2xl font-bold mt-1">Wohin geht der Pfeil?</h2>
-                    </div>
-                    <button onClick={handleBack} disabled={currentStepIndex===0} className="p-2 hover:bg-slate-100 rounded disabled:opacity-30"><ChevronLeft/></button>
-                  </div>
-
-                  <div className="flex gap-4 mb-6 bg-indigo-50 p-4 rounded-lg items-center">
-                     <div>Start: <span className="font-mono font-bold bg-white px-2 py-1 rounded border border-indigo-200">S{currentFocus.stateIdx} = {formatSet(discoveredStates[currentFocus.stateIdx])}</span></div>
-                     <ArrowRight className="text-slate-400" />
-                     <div>Eingabe: <span className="font-mono font-bold bg-slate-800 text-white w-8 h-8 inline-flex items-center justify-center rounded">{currentFocus.symbol}</span></div>
-                  </div>
-
-                  <p className="mb-4 text-slate-700 font-medium">Markiere alle erreichbaren Ziel-Zustände:</p>
-                  <div className="flex flex-wrap gap-3 mb-6">
-                    {config.states.map(sId => (
-                      <button key={sId} onClick={() => handleToggleState(sId)} disabled={feedback?.type === 'success'}
-                        className={`w-12 h-12 rounded-lg font-mono font-bold border-2 ${userSelection.includes(sId) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white border-slate-200 text-slate-500 hover:border-indigo-400'}`}>
-                        q{sId}
-                      </button>
-                    ))}
-                    <button onClick={() => !feedback && setUserSelection([])} disabled={feedback?.type === 'success'}
-                      className={`px-4 h-12 rounded-lg border-2 border-dashed font-medium text-sm ${userSelection.length===0 ? 'border-indigo-400 bg-indigo-50 text-indigo-700' : 'border-slate-300 text-slate-400'}`}>
-                      Leere Menge ∅
-                    </button>
-                  </div>
-
-                  {feedback && (
-                    <div className={`mb-4 p-3 rounded flex gap-2 ${feedback.type==='success'?'bg-green-50 text-green-800':'bg-red-50 text-red-800'}`}>
-                      {feedback.type==='success'?<Check size={20}/>:<X size={20}/>} {feedback.message}
-                    </div>
-                  )}
-
-                  {!feedback && (
-                    <button onClick={checkAnswer} className="w-full py-3 bg-slate-900 text-white font-bold rounded-lg shadow hover:bg-slate-800">
-                      Prüfen
-                    </button>
-                  )}
-                </>
-              ) : (
-                <div className="text-center py-10">
-                   <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-4"><Check size={32}/></div>
-                   <h2 className="text-2xl font-bold mb-2">Fertig!</h2>
-                   <p className="text-slate-600">Du hast den Algorithmus erfolgreich durchgeführt.</p>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-xl shadow-sm border p-6">
-            <h3 className="font-bold text-slate-700 mb-4">2. Tabelle</h3>
-            <table className="w-full text-sm text-left">
-              <thead className="bg-slate-50 text-slate-500">
-                <tr>
-                  <th className="p-3">DEA Zustand</th>
-                  <th className="p-3">Menge</th>
-                  {config.alphabet.map(sym => <th key={sym} className="p-3 text-center">'{sym}'</th>)}
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {discoveredStates.map((set, idx) => {
-                  const isActive = currentFocus && currentFocus.stateIdx === idx;
-                  return (
-                    <tr key={idx} className={isActive ? 'bg-indigo-50' : ''}>
-                      <td className="p-3 font-bold text-indigo-700">S{idx} {set.some(s=>config.finalStates.includes(s))&&<span className="text-red-500 text-xs">(End)</span>}</td>
-                      <td className="p-3 font-mono text-slate-600">{formatSet(set)}</td>
-                      {config.alphabet.map(sym => (
-                        <td key={sym} className={`p-3 text-center border-l ${isActive && currentFocus.symbol === sym ? 'bg-yellow-100 font-bold' : ''}`}>
-                          {transitions[idx]?.[sym] !== undefined ? `S${transitions[idx][sym]}` : '-'}
-                        </td>
-                      ))}
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </main>
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-800">
+      {screen === 'menu' ? (
+        <MenuScreen levels={LEVELS} progress={progress} totalScore={totalScore} onStart={startLevel} />
+      ) : (
+        <LevelController 
+          level={LEVELS.find(l => l.id === activeLevelId)} 
+          onExit={() => setScreen('menu')}
+          onComplete={(m) => handleLevelComplete(activeLevelId, m)}
+        />
+      )}
     </div>
   );
 };
 
-// --- VISUALISIERUNG (Angepasst für einfaches Beispiel) ---
+// --- MENU ---
 
-const NFAVisualizer = ({ config, activeStates }) => (
-  <svg viewBox="0 0 500 400" className="w-full h-full pointer-events-none select-none">
-    <defs>
-      <marker id="m-nfa" markerWidth="10" markerHeight="7" refX="32" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/></marker>
-      <marker id="m-nfa-loop" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/></marker>
-    </defs>
-    {/* Pfade für Einfaches Beispiel (3 Zustände in Reihe) */}
-    <LoopPath x={100} y={200} label="0, 1" dir="top" /> {/* q0 Loop 0,1 bei nicht-det? Im Config ist 0->0, 1->0,1. Also loop 0,1 */}
-    <LinePath x1={100} y1={200} x2={250} y2={200} label="1" /> {/* q0 -> q1 */}
-    <LinePath x1={250} y1={200} x2={400} y2={200} label="0" /> {/* q1 -> q2 */}
+const MenuScreen = ({ levels, progress, onStart, totalScore }) => (
+  <div className="max-w-6xl mx-auto p-6 md:p-8">
+    <div className="flex flex-col md:flex-row justify-between items-center mb-10 bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+      <div className="flex items-center gap-4 mb-4 md:mb-0">
+        <div className="bg-indigo-600 text-white p-3 rounded-2xl">
+          <Network size={32} />
+        </div>
+        <div>
+          <h1 className="text-2xl md:text-3xl font-bold text-slate-900">NEA zu DEA Trainer</h1>
+          <p className="text-slate-500">Meistere die Potenzmengenkonstruktion</p>
+        </div>
+      </div>
+      <div className="flex items-center gap-3 bg-yellow-50 px-6 py-3 rounded-2xl border border-yellow-100">
+        <div className="bg-yellow-400 text-white p-2 rounded-full shadow-sm">
+           <Star size={20} fill="currentColor"/>
+        </div>
+        <div>
+           <div className="text-xs font-bold text-yellow-700 uppercase tracking-wider">Gesamt-Score</div>
+           <div className="text-2xl font-bold text-slate-800">{isNaN(totalScore) ? 0 : totalScore}</div>
+        </div>
+      </div>
+    </div>
 
-    {config.states.map(id => {
-      const {x, y, label} = config.layout[id];
-      const active = activeStates?.includes(id);
-      return (
-        <g key={id} transform={`translate(${x},${y})`}>
-          <circle r="20" fill={active?'#e0e7ff':'white'} stroke={active?'#4f46e5':'#64748b'} strokeWidth="2"/>
-          {config.finalStates.includes(id) && <circle r="16" fill="none" stroke={active?'#4f46e5':'#64748b'} strokeWidth="1"/>}
-          <text y="5" textAnchor="middle" className={`font-mono text-sm font-bold ${active?'fill-indigo-700':'fill-slate-600'}`}>{label}</text>
-        </g>
-      )
-    })}
-  </svg>
+    <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+      {levels.map(l => {
+        const p = progress[l.id] || {};
+        const isLocked = !p.unlocked;
+        return (
+          <div key={l.id} className={`relative p-6 rounded-2xl border-2 flex flex-col transition-all duration-300 ${isLocked ? 'bg-slate-100 border-slate-200 opacity-60 grayscale' : 'bg-white border-indigo-50 shadow-lg hover:-translate-y-1 hover:shadow-xl hover:border-indigo-300'}`}>
+            <div className="flex justify-between items-start mb-4">
+              <span className={`px-3 py-1 rounded-lg text-xs font-bold uppercase tracking-wider ${l.difficulty==='Einfach'?'bg-green-100 text-green-700':l.difficulty==='Mittel'?'bg-blue-100 text-blue-700':'bg-purple-100 text-purple-700'}`}>
+                {l.difficulty}
+              </span>
+              {isLocked ? <Lock className="text-slate-400" size={20}/> : p.complete && <div className="bg-green-100 text-green-600 p-1 rounded-full"><Check size={16} strokeWidth={3}/></div>}
+            </div>
+            <h3 className="text-xl font-bold mb-1">Level {l.id}: {l.title}</h3>
+            <p className="text-sm text-slate-500 mb-6 flex-grow leading-relaxed">{l.description}</p>
+            {p.complete && (
+               <div className="mb-4 flex items-center gap-2 text-sm font-bold text-slate-600 bg-slate-50 p-2 rounded-lg">
+                  <Star size={16} className="text-yellow-400" fill="currentColor"/> 
+                  Highscore: {isNaN(p.score) ? 0 : p.score}
+               </div>
+            )}
+            <button 
+              onClick={() => !isLocked && onStart(l.id)}
+              disabled={isLocked}
+              className={`w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors ${isLocked ? 'bg-slate-300 text-slate-500' : 'bg-slate-900 text-white hover:bg-indigo-600'}`}
+            >
+              {p.complete ? 'Nochmal spielen' : 'Starten'} <Play size={16} fill="currentColor"/>
+            </button>
+          </div>
+        )
+      })}
+    </div>
+  </div>
 );
 
-const DFAVisualizer = ({ states, transitions, activeState, nfaConfig }) => (
-  <svg viewBox="0 0 400 400" className="w-full h-full select-none">
-    <defs>
-      <marker id="m-dfa" markerWidth="10" markerHeight="7" refX="32" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#4338ca"/></marker>
-      <marker id="m-dfa-loop" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#4338ca"/></marker>
-    </defs>
-    {Object.entries(transitions).map(([src, targets]) => (
-      <React.Fragment key={src}>
-        {Object.entries(targets).map(([sym, tIdx]) => {
-           // Gruppierung simulieren wenn nötig, hier einfach alle zeichnen.
-           // Besser: Gruppieren wie vorher
-           return null; 
-        })}
-        {/* Simplified rendering loop just for grouping */}
-        {Object.entries(groupByTarget(targets)).map(([t, syms]) => {
-           const sIdx=parseInt(src), tIdx=parseInt(t);
-           const p1 = getGridPos(sIdx), p2 = getGridPos(tIdx);
-           const label = syms.join(',');
-           const isLoop = sIdx===tIdx;
-           return isLoop 
-             ? <LoopPath key={src+t} x={p1.x} y={p1.y} label={label} dir="bottom" color="#4338ca" mId="m-dfa-loop"/>
-             : <LinePath key={src+t} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} label={label} color="#4338ca" mId="m-dfa" curve={Math.abs(sIdx-tIdx)>1}/>
-        })}
-      </React.Fragment>
-    ))}
-    {states.map((set, idx) => {
-      const {x, y} = getGridPos(idx);
-      const active = idx === activeState;
-      const isFin = set.some(s => nfaConfig.finalStates.includes(s));
-      return (
-        <g key={idx} transform={`translate(${x},${y})`}>
-          <circle r="22" fill={active?'#fbbf24':'white'} stroke="#4338ca" strokeWidth={active?3:2}/>
-          {isFin && <circle r="18" fill="none" stroke="#4338ca" strokeWidth="1"/>}
-          <text y="5" textAnchor="middle" className="font-bold text-xs fill-indigo-900">S{idx}</text>
-        </g>
-      )
-    })}
-  </svg>
-);
+// --- LEVEL CONTROLLER ---
 
-// Helpers
-const groupByTarget = (targets) => {
-  const g = {};
-  Object.entries(targets).forEach(([s,t]) => { if(!g[t])g[t]=[]; g[t].push(s); });
-  return g;
-}
-const getGridPos = (idx) => ({ x: 100 + (idx%2)*150, y: 100 + Math.floor(idx/2)*120 });
+const LevelController = ({ level, onExit, onComplete }) => {
+  const [phase, setPhase] = useState('table'); 
+  const [tableData, setTableData] = useState(null); 
+  const [mistakes, setMistakes] = useState(0);
 
-const LinePath = ({ x1, y1, x2, y2, label, curve, color="#94a3b8", mId="m-nfa" }) => {
-  const mx=(x1+x2)/2, my=(y1+y2)/2;
-  let d=`M ${x1} ${y1} L ${x2} ${y2}`, lx=mx, ly=my;
-  if(curve) {
-    const dx=x2-x1, dy=y2-y1;
-    const cx=mx-dy*0.3, cy=my+dx*0.3;
-    d=`M ${x1} ${y1} Q ${cx} ${cy} ${x2} ${y2}`;
-    lx=cx*0.5+mx*0.5; ly=cy*0.5+my*0.5;
+  const handleTableFinish = (data, m) => {
+    setTableData(data); 
+    setMistakes(m); 
+    setPhase('builder');
+  };
+
+  const handleBuilderFinish = () => {
+    setPhase('success');
+  };
+
+  if (phase === 'success') {
+    const levelScore = Math.max(100, 1000 - (mistakes * 50));
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4 animate-in zoom-in-95">
+        <div className="bg-white p-10 rounded-3xl shadow-2xl max-w-lg w-full text-center relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-green-400 to-indigo-500"></div>
+          <div className="w-24 h-24 bg-yellow-100 text-yellow-500 rounded-full flex items-center justify-center mx-auto mb-6 shadow-lg">
+            <Trophy size={48} strokeWidth={3} fill="#fbbf24" className="text-yellow-600"/>
+          </div>
+          <h2 className="text-3xl font-bold text-slate-900 mb-2">Level {level.id} gemeistert!</h2>
+          <div className="text-4xl font-black text-indigo-600 mb-8 mt-4 tracking-tight">
+             +{levelScore} <span className="text-lg text-slate-400 font-normal">Punkte</span>
+          </div>
+          <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 mb-8 flex justify-between items-center">
+             <span className="text-slate-500 font-bold uppercase text-xs">Gesamtfehler</span>
+             <span className="text-xl font-mono font-bold text-red-500">{mistakes}</span>
+          </div>
+          <button onClick={() => onComplete(mistakes)} className="w-full py-4 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 transition-transform active:scale-95">
+            Weiter
+          </button>
+        </div>
+      </div>
+    );
   }
-  return (
-    <g>
-      <path d={d} fill="none" stroke={color} strokeWidth="2" markerEnd={`url(#${mId})`}/>
-      <rect x={lx-8} y={ly-8} width="16" height="16" rx="4" fill="white" stroke={color}/>
-      <text x={lx} y={ly+4} textAnchor="middle" className="text-xs font-bold font-mono" fill={color}>{label}</text>
-    </g>
-  )
-}
 
-const LoopPath = ({ x, y, label, dir='top', color="#94a3b8", mId="m-nfa-loop" }) => {
-  const o = {top:{dx:0,dy:-1}, bottom:{dx:0,dy:1}}[dir] || {dx:0,dy:-1};
-  const cp1x=x+o.dx*50-o.dy*30, cp1y=y+o.dy*50+o.dx*30;
-  const cp2x=x+o.dx*50+o.dy*30, cp2y=y+o.dy*50-o.dx*30;
   return (
-    <g>
-      <path d={`M ${x} ${y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${x} ${y}`} fill="none" stroke={color} strokeWidth="2" markerEnd={`url(#${mId})`}/>
-      <rect x={x+o.dx*45-10} y={y+o.dy*45-8} width="20" height="16" rx="4" fill="white" stroke={color}/>
-      <text x={x+o.dx*45} y={y+o.dy*45+4} textAnchor="middle" className="text-xs font-bold font-mono" fill={color}>{label}</text>
-    </g>
-  )
-}
+    <div className="h-screen flex flex-col bg-slate-50">
+      <div className="bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center z-20 shadow-sm">
+        <div className="flex items-center gap-4">
+          <button onClick={onExit} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 transition-colors"><ArrowRight className="rotate-180"/></button>
+          <div>
+            <h2 className="font-bold text-slate-800 flex items-center gap-2">
+              Level {level.id} <span className="text-slate-300">|</span> {phase === 'table' ? 'Tabelle erstellen' : 'Automatische Konstruktion'}
+            </h2>
+            <div className="flex gap-1 h-1.5 w-40 bg-slate-100 rounded-full overflow-hidden mt-1.5">
+              <div className={`h-full ${phase === 'table' ? 'w-1/2 bg-indigo-500' : 'w-full bg-green-500'} transition-all duration-700 ease-out`}/>
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+           <div className="bg-slate-100 px-3 py-1.5 rounded-lg flex items-center gap-2 text-sm font-bold text-slate-600">
+              <Hash size={16}/> Fehler: <span className={mistakes > 0 ? "text-red-500" : ""}>{mistakes}</span>
+           </div>
+        </div>
+      </div>
 
-export default NeaToDeaTrainer;
+      <div className="flex-1 overflow-hidden relative">
+        {phase === 'table' ? (
+          <TableTrainer level={level} onComplete={handleTableFinish} onMistake={() => setMistakes(m => m + 1)} />
+        ) : (
+          <AutoDiagramBuilder 
+            level={level} 
+            states={tableData.discoveredStates} 
+            transitions={tableData.transitions} 
+            onComplete={handleBuilderFinish}
+          />
+        )}
+      </div>
+    </div>
+  );
+};
+
+// --- PHASE 1: TABLE TRAINER ---
+
+const TableTrainer = ({ level, onComplete, onMistake }) => {
+  const [discovered, setDiscovered] = useState([[level.config.startState]]);
+  const [queue, setQueue] = useState([0]);
+  const [transitions, setTransitions] = useState({});
+  const [focus, setFocus] = useState({ sIdx: 0, sym: level.config.alphabet[0] });
+  const [selection, setSelection] = useState([]);
+  const [feedback, setFeedback] = useState(null); 
+
+  const activeSource = discovered[focus?.sIdx];
+
+  const handleToggle = (id) => {
+    if (feedback === 'success') return;
+    if (feedback === 'error') setFeedback(null);
+    setSelection(prev => prev.includes(id) ? prev.filter(x=>x!==id) : [...prev,id].sort((a,b)=>a-b));
+  };
+
+  const check = () => {
+    const target = calculateTarget(activeSource, focus.sym, level.config);
+    if (areSetsEqual(selection, target)) {
+      setFeedback('success');
+      const existsIdx = discovered.findIndex(s => areSetsEqual(s, target));
+      const isNew = existsIdx === -1;
+      const nextDiscovered = [...discovered];
+      const nextQueue = [...queue];
+      let targetIdx = existsIdx;
+
+      if (isNew) {
+        nextDiscovered.push(target);
+        targetIdx = nextDiscovered.length - 1;
+        nextQueue.push(targetIdx);
+      }
+
+      const nextTransitions = {
+        ...transitions,
+        [focus.sIdx]: { ...(transitions[focus.sIdx] || {}), [focus.sym]: targetIdx }
+      };
+
+      const syms = level.config.alphabet;
+      const sIdx = syms.indexOf(focus.sym);
+      let nextFocus = null;
+      let nextQueueState = [...nextQueue];
+
+      if (sIdx < syms.length - 1) {
+        nextFocus = { sIdx: focus.sIdx, sym: syms[sIdx + 1] };
+      } else {
+        nextQueueState.shift();
+        if (nextQueueState.length > 0) nextFocus = { sIdx: nextQueueState[0], sym: syms[0] };
+      }
+
+      setTimeout(() => {
+        setDiscovered(nextDiscovered);
+        setQueue(nextQueueState);
+        setTransitions(nextTransitions);
+        setFocus(nextFocus);
+        setSelection([]);
+        setFeedback(null);
+        if (!nextFocus) onComplete({ discoveredStates: nextDiscovered, transitions: nextTransitions }, 0); 
+      }, 800);
+    } else {
+      setFeedback('error');
+      onMistake();
+    }
+  };
+
+  return (
+    <div className="grid lg:grid-cols-2 h-full">
+      <div className="bg-slate-100 p-6 overflow-y-auto">
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 h-72 mb-6 flex flex-col justify-center">
+          <NfaDiagram config={level.config} activeStates={activeSource} />
+        </div>
+        
+        <div className={`p-6 rounded-2xl border-2 transition-colors duration-300 shadow-sm ${feedback==='error'?'bg-red-50 border-red-200':'bg-white border-white'}`}>
+          <div className="flex justify-between items-start mb-6">
+            <div>
+              <h3 className="text-lg font-bold text-slate-800">Übergang bestimmen</h3>
+              <p className="text-slate-600 text-sm mt-1">
+                 Wir sind in <strong>{formatSetString(activeSource)}</strong>. Wohin führen die Pfeile für Eingabe?
+              </p>
+            </div>
+            {focus && <div className="bg-slate-800 text-white w-12 h-12 flex items-center justify-center rounded-xl font-mono font-bold text-xl shadow-lg">{focus.sym}</div>}
+          </div>
+
+          <div className="flex flex-wrap gap-3 mb-8">
+            {level.config.states.map(id => (
+              <button key={id} onClick={() => handleToggle(id)} className={`w-14 h-14 rounded-xl font-mono text-lg font-bold border-2 transition-all duration-200 ${selection.includes(id)?'bg-indigo-600 text-white border-indigo-600 scale-110 shadow-indigo-200':'bg-white border-slate-200 text-slate-500 hover:border-indigo-200 hover:text-indigo-600'}`}>
+                q<sub className="text-xs">{id}</sub>
+              </button>
+            ))}
+            <button onClick={() => setSelection([])} className={`px-6 rounded-xl border-2 border-dashed text-sm font-bold transition-colors ${selection.length===0?'bg-indigo-50 text-indigo-700 border-indigo-300':'bg-white text-slate-400 hover:bg-slate-50'}`}>∅</button>
+          </div>
+
+          {feedback === 'error' ? (
+            <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-red-100 text-red-600 font-bold text-sm shadow-sm animate-in slide-in-from-bottom-2">
+              <span className="flex items-center gap-2"><AlertCircle size={20}/> Falsche Menge!</span>
+              <button onClick={() => setFeedback(null)} className="bg-red-50 px-4 py-2 rounded-lg hover:bg-red-100 flex items-center gap-2 transition-colors"><RotateCcw size={16}/> Korrigieren</button>
+            </div>
+          ) : (
+            <button onClick={check} disabled={feedback==='success'} className={`w-full py-4 rounded-xl font-bold text-white transition-all transform active:scale-[0.98] shadow-lg ${feedback==='success'?'bg-green-500 shadow-green-200':'bg-slate-900 hover:bg-indigo-600 shadow-slate-200'}`}>
+              {feedback === 'success' ? <Check className="mx-auto" strokeWidth={3}/> : 'Prüfen'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-white border-l border-slate-200 flex flex-col overflow-hidden">
+        <div className="bg-slate-50 px-6 py-3 border-b border-slate-200 font-bold text-slate-600 text-xs uppercase tracking-wider">Zustandstabelle</div>
+        <div className="overflow-auto flex-1 p-0">
+          <table className="w-full text-sm text-left">
+            <thead className="bg-white sticky top-0 shadow-sm text-slate-500 z-10">
+              <tr><th className="p-4 bg-white">DEA</th><th className="p-4 bg-white">Menge (NEA)</th>{level.config.alphabet.map(s=><th key={s} className="p-4 text-center bg-white">'{s}'</th>)}</tr>
+            </thead>
+            <tbody className="divide-y divide-slate-50">
+              {discovered.map((set, i) => {
+                const active = focus?.sIdx === i;
+                return (
+                  <tr key={i} className={`transition-colors duration-300 ${active ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}>
+                    <td className="p-4 font-bold text-indigo-700">S{i}</td>
+                    <td className="p-4 font-mono text-slate-600">
+                      {formatSetString(set)}
+                    </td>
+                    {level.config.alphabet.map(s => (
+                      <td key={s} className="p-4 text-center border-l border-slate-100">
+                        {transitions[i]?.[s] !== undefined ? <span className="bg-white border border-slate-200 px-2 py-1 rounded font-bold shadow-sm">S{transitions[i][s]}</span> : active && focus.sym === s ? <div className="w-2.5 h-2.5 bg-indigo-500 rounded-full mx-auto animate-ping"/> : '-'}
+                      </td>
+                    ))}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- PHASE 2: AUTO BUILDER ---
+
+const AutoDiagramBuilder = ({ level, states, transitions, onComplete }) => {
+  const getPos = (i) => ({ x: 100 + (i % 3) * 160, y: 100 + Math.floor(i / 3) * 140 });
+
+  const [step, setStep] = useState(0); 
+  const [visibleNodes, setVisibleNodes] = useState([]);
+  const [visibleEdges, setVisibleEdges] = useState([]);
+  const [currentActionText, setCurrentActionText] = useState("Vorbereitung...");
+  
+  // Sequence calculation
+  const sequence = useMemo(() => {
+    const seq = [];
+    const addedNodes = new Set();
+
+    states.forEach((_, idx) => {
+        if (!addedNodes.has(idx)) {
+            const parts = formatNodeLabelParts(states[idx]);
+            seq.push({ type: 'node', id: idx, desc: `Füge Zustand S${idx} (${parts.main}${parts.sub}) hinzu` });
+            addedNodes.add(idx);
+        }
+        if (transitions[idx]) {
+            // Group by target to show full edge at once
+            const edgesByTarget = {};
+            Object.entries(transitions[idx]).forEach(([sym, target]) => {
+                if (!edgesByTarget[target]) edgesByTarget[target] = [];
+                edgesByTarget[target].push(sym);
+            });
+
+            Object.entries(edgesByTarget).forEach(([targetStr, syms]) => {
+                const target = parseInt(targetStr);
+                if (!addedNodes.has(target)) {
+                    const parts = formatNodeLabelParts(states[target]);
+                    seq.push({ type: 'node', id: target, desc: `Füge neuen Zielzustand S${target} hinzu` });
+                    addedNodes.add(target);
+                }
+                const labelStr = syms.sort().join(', ');
+                seq.push({ type: 'edge', from: idx, to: target, labels: syms.sort(), desc: `Verbinde S${idx} -> S${target} für Eingabe ${labelStr}` });
+            });
+        }
+    });
+    return seq;
+  }, [states, transitions]);
+
+  useEffect(() => {
+    if (sequence.length === 0) return;
+    
+    const timer = setInterval(() => {
+        setStep(s => {
+            if (s >= sequence.length) {
+                clearInterval(timer);
+                setCurrentActionText("Konstruktion abgeschlossen!");
+                return s;
+            }
+            const action = sequence[s];
+            setCurrentActionText(action.desc);
+            
+            if (action.type === 'node') {
+                setVisibleNodes(prev => [...prev, action.id]);
+            } else {
+                setVisibleEdges(prev => [...prev, action]);
+            }
+            return s + 1;
+        });
+    }, 1500);
+
+    return () => clearInterval(timer);
+  }, [sequence]);
+
+  const isFinished = step >= sequence.length && sequence.length > 0;
+
+  return (
+    <div className="flex flex-col h-full bg-slate-50">
+      <div className="p-4 bg-white border-b flex justify-between items-center shadow-sm z-10 px-6">
+        <div className="flex items-center gap-3 text-slate-700 font-medium">
+           {isFinished ? <Check size={20} className="text-green-500"/> : <Activity size={20} className="text-indigo-500 animate-pulse"/>}
+           <span>{currentActionText}</span>
+        </div>
+        {isFinished && (
+           <button onClick={onComplete} className="bg-green-500 text-white px-8 py-2 rounded-xl font-bold hover:bg-green-600 animate-bounce shadow-green-200 shadow-lg">
+             Level abschließen
+           </button>
+        )}
+      </div>
+
+      <div className="flex-1 relative overflow-hidden bg-slate-50">
+        <svg className="w-full h-full">
+          <defs>
+            {/* DEA Node Radius 26. Padding 2. Arrow 10. RefX=38. */}
+            <marker id="arrow-auto" markerWidth="10" markerHeight="7" refX="38" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#4f46e5" /></marker>
+          </defs>
+          
+          {visibleEdges.map((e, i) => {
+            const start = getPos(e.from);
+            const end = getPos(e.to);
+            const isLoop = e.from === e.to;
+            const isLatest = i === visibleEdges.length - 1 && !isFinished;
+            
+            // Check for reverse edge (back and forth)
+            const hasReverse = visibleEdges.some(other => other.from === e.to && other.to === e.from);
+            
+            let d, lx, ly;
+            if (isLoop) {
+               d = `M ${start.x} ${start.y} C ${start.x-50} ${start.y-80}, ${start.x+50} ${start.y-80}, ${start.x} ${start.y}`;
+               lx=start.x; ly=start.y-75;
+            } else if (hasReverse) {
+               // Curve logic for bidirectional edges
+               const dx = end.x - start.x;
+               const dy = end.y - start.y;
+               const len = Math.sqrt(dx*dx + dy*dy) || 1;
+               const offset = 40; 
+               // Left turn offset
+               const nx = dy / len * offset;
+               const ny = -dx / len * offset;
+               const mx = (start.x + end.x) / 2;
+               const my = (start.y + end.y) / 2;
+               const cpx = mx + nx;
+               const cpy = my + ny;
+               
+               d = `M ${start.x} ${start.y} Q ${cpx} ${cpy} ${end.x} ${end.y}`;
+               lx = 0.25*start.x + 0.5*cpx + 0.25*end.x;
+               ly = 0.25*start.y + 0.5*cpy + 0.25*end.y;
+            } else {
+               d = `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
+               lx=(start.x+end.x)/2; ly=(start.y+end.y)/2;
+            }
+            
+            return (
+              <g key={i} className="animate-in fade-in duration-500">
+                <path d={d} fill="none" stroke={isLatest ? "#22c55e" : "#4f46e5"} strokeWidth={isLatest ? 3 : 2} markerEnd="url(#arrow-auto)" className="transition-all duration-500"/>
+                <rect x={lx-10} y={ly-10} width="20" height="20" rx="4" fill="white" stroke={isLatest ? "#22c55e" : "#e0e7ff"}/>
+                <text x={lx} y={ly+4} textAnchor="middle" className={`text-xs font-bold ${isLatest ? 'fill-green-600' : 'fill-indigo-700'}`}>{e.labels.join(',')}</text>
+              </g>
+            )
+          })}
+          
+          {visibleNodes.map((idx, i) => {
+            const pos = getPos(idx);
+            const set = states[idx];
+            const parts = formatNodeLabelParts(set);
+            const isFinal = set.some(s => level.config.finalStates.includes(s));
+            const isStart = idx === 0;
+            const isLatest = i === visibleNodes.length - 1 && !isFinished;
+            
+            return (
+              <g key={idx} transform={`translate(${pos.x},${pos.y})`} className="animate-in zoom-in duration-300">
+                <circle r="26" fill={isLatest ? '#dcfce7' : (isStart ? '#f0f9ff' : 'white')} stroke={isLatest ? '#22c55e' : '#4f46e5'} strokeWidth="3" className="transition-colors duration-500"/>
+                {isFinal && <circle r="22" fill="none" stroke={isLatest ? '#22c55e' : '#4f46e5'} strokeWidth="1"/>}
+                <LabelRenderer x={0} y={5} main={parts.main} sub={parts.sub} active={true} />
+              </g>
+            )
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+};
+
+// --- NFA SVG VISUALIZER ---
+
+const NfaDiagram = ({ config, activeStates }) => {
+  const getEdges = () => {
+    const edges = [];
+    config.states.forEach(src => {
+        const tMap = {};
+        Object.entries(config.transitions[src]).forEach(([sym, targets]) => {
+            targets.forEach(tgt => {
+                if(!tMap[tgt]) tMap[tgt] = [];
+                tMap[tgt].push(sym);
+            });
+        });
+        Object.entries(tMap).forEach(([tgt, syms]) => edges.push({src, tgt: parseInt(tgt), labels: syms.sort()}));
+    });
+    return edges;
+  };
+
+  return (
+    <svg viewBox="0 0 500 350" className="w-full h-full select-none">
+       <defs>
+        {/* NFA Node Radius 22. Arrow 10. Padding 2. RefX=34 */}
+        <marker id="arrow-nfa" markerWidth="10" markerHeight="7" refX="34" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/></marker>
+      </defs>
+      
+      {getEdges().map((edge, i) => {
+         const sPos = config.layout[edge.src];
+         const tPos = config.layout[edge.tgt];
+         const isLoop = edge.src === edge.tgt;
+         const txt = edge.labels.join(',');
+         let d, lx, ly;
+         
+         if (isLoop) {
+             d = `M ${sPos.x} ${sPos.y} C ${sPos.x-40} ${sPos.y-60}, ${sPos.x+40} ${sPos.y-60}, ${sPos.x} ${sPos.y}`;
+             lx = sPos.x; ly = sPos.y - 55;
+         } else {
+             d = `M ${sPos.x} ${sPos.y} L ${tPos.x} ${tPos.y}`;
+             lx = (sPos.x + tPos.x) / 2; ly = (sPos.y + tPos.y) / 2 - 8;
+         }
+         
+         return (
+             <g key={i}>
+                <path d={d} fill="none" stroke="#94a3b8" strokeWidth="2" markerEnd="url(#arrow-nfa)"/>
+                <rect x={lx-10} y={ly-10} width="20" height="18" rx="4" fill="white" stroke="#e2e8f0"/>
+                <text x={lx} y={ly+4} textAnchor="middle" className="text-xs font-bold fill-slate-500 font-mono">{txt}</text>
+             </g>
+         )
+      })}
+      
+      {config.states.map(id => {
+        const {x,y,label} = config.layout[id];
+        const active = activeStates.includes(id);
+        const isFin = config.finalStates.includes(id);
+        return (
+          <g key={id} transform={`translate(${x},${y})`}>
+            <circle r="22" fill={active?'#e0e7ff':'white'} stroke={active?'#4f46e5':'#64748b'} strokeWidth={active?3:2}/>
+            {isFin && <circle r="18" fill="none" stroke="currentColor" strokeWidth="1"/>}
+            <LabelRenderer x={0} y={5} main="q" sub={id} active={active} />
+          </g>
+        )
+      })}
+    </svg>
+  );
+};
+
+export default App;
